@@ -123,13 +123,19 @@ def attach_calculators(neb, calculator_factory, workdir=None):
     """
     import inspect
 
+    from ase.calculators.calculator import FileIOCalculator
+
     n_args = len(inspect.signature(calculator_factory).parameters)
 
     # Endpoints are fixed in a standard NEB run; only images 1..N-2 move.
     for idx, image in enumerate(neb.images[1:-1], start=1):
         calc = calculator_factory(idx) if n_args >= 1 else calculator_factory()
 
-        if workdir is not None and hasattr(calc, "directory"):
+        # Only file-based calculators (VASP, CP2K, Gaussian, ...) need their
+        # own scratch directory. In-memory calculators (EMT, MACE, DeePMD)
+        # inherit a `directory` attribute from ASE's base class but never
+        # write to it, so creating one would just leave empty folders behind.
+        if workdir is not None and isinstance(calc, FileIOCalculator):
             image_dir = Path(workdir) / f"image_{idx:02d}"
             image_dir.mkdir(parents=True, exist_ok=True)
             calc.directory = str(image_dir)
@@ -257,6 +263,11 @@ def run_neb(
     write(workdir / "neb_saddle.xyz", saddle)
     summary["saddle_file"] = str(workdir / "neb_saddle.xyz")
 
+    # Viewer-friendly exports (VMD / PyMOL).
+    summary["visualization"] = write_visualization(
+        neb.images, workdir=workdir, optimizer_traj=traj_path
+    )
+
     SparcLog("=" * 60)
     SparcLog("                   NEB SUMMARY                     ")
     SparcLog("=" * 60)
@@ -344,3 +355,82 @@ def plot_band(images, filename="neb_profile.png", workdir=None):
     SparcLog(f"[NEB] Energy profile written to {out}")
 
     return str(out)
+
+# ===================================================================================================#
+def write_visualization(images, workdir=None, prefix="neb_path", optimizer_traj=None):
+    """
+    Write the band in formats that VMD and PyMOL can animate.
+
+    ASE's native .traj is a binary format that external viewers cannot read.
+    This writes the same information as multi-frame XYZ and PDB, both of which
+    load directly as animations:
+
+        VMD    : vmd neb_path.xyz
+        PyMOL  : load neb_path.xyz
+
+    Parameters
+    ----------
+    images : list of ase.Atoms
+        Relaxed band, including endpoints.
+    workdir : str or Path, optional
+        Output directory.
+    prefix : str, optional
+        Base filename.
+    optimizer_traj : str or Path, optional
+        Path to the optimizer .traj file. If given, the full relaxation
+        history is also exported as a movie, which is useful for diagnosing
+        a band that converged somewhere unexpected.
+
+    Returns
+    -------
+    dict
+        Paths of the files written.
+    """
+    base = Path(workdir) if workdir else Path(".")
+    base.mkdir(parents=True, exist_ok=True)
+    written = {}
+
+    # --- final band -------------------------------------------------------
+    xyz_path = base / f"{prefix}.xyz"
+    write(xyz_path, images, format="extxyz")
+    written["xyz"] = str(xyz_path)
+
+    pdb_path = base / f"{prefix}.pdb"
+    try:
+        write(pdb_path, images, format="proteindatabank")
+        written["pdb"] = str(pdb_path)
+    except Exception as exc:  # noqa: BLE001
+        SparcLog(f"[NEB] PDB export skipped: {exc}")
+
+    # --- reaction-coordinate ordering -------------------------------------
+    # Viewers step through frames in file order, which is already the band
+    # order, so the animation runs reactant -> saddle -> product.
+    SparcLog(f"[NEB] Visualization written: {xyz_path}")
+    SparcLog("[NEB]   VMD   : vmd " + str(xyz_path))
+    SparcLog("[NEB]   PyMOL : load " + str(xyz_path))
+
+    # --- optional: full optimizer history ---------------------------------
+    if optimizer_traj is not None and Path(optimizer_traj).exists():
+        try:
+            history = read(str(optimizer_traj), index=":")
+            n_moving = len(images) - 2
+            if n_moving > 0 and len(history) >= n_moving:
+                n_steps = len(history) // n_moving
+                movie = []
+                for step in range(n_steps):
+                    block = history[step * n_moving : (step + 1) * n_moving]
+                    # Re-attach the fixed endpoints so each frame is a full band.
+                    frame = [images[0]] + list(block) + [images[-1]]
+                    movie.extend(frame)
+
+                movie_path = base / f"{prefix}_optimization.xyz"
+                write(movie_path, movie, format="extxyz")
+                written["optimization_movie"] = str(movie_path)
+                SparcLog(
+                    f"[NEB] Optimization history written: {movie_path} "
+                    f"({n_steps} steps x {len(images)} images)"
+                )
+        except Exception as exc:  # noqa: BLE001
+            SparcLog(f"[NEB] Optimization movie skipped: {exc}")
+
+    return written
