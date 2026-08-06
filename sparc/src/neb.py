@@ -101,9 +101,9 @@ def build_band(
 
 
 # ===================================================================================================#
-def attach_calculators(neb, calculator_factory, workdir=None):
+def attach_calculators(neb, calculator_factory, workdir=None, include_endpoints=True):
     """
-    Attach a SEPARATE calculator instance to every intermediate image.
+    Attach a SEPARATE calculator instance to every image.
 
     Each image must own its calculator. Sharing one instance across images
     causes silent result contamination for stateful calculators, and for
@@ -120,6 +120,12 @@ def attach_calculators(neb, calculator_factory, workdir=None):
         calculators can be given a unique directory.
     workdir : str or Path, optional
         Parent directory for per-image scratch directories.
+    include_endpoints : bool, optional
+        Endpoints are held fixed during optimisation and so need no forces,
+        but their ENERGIES are required to compute barriers. Structures read
+        from formats that store energies (.traj) carry a SinglePointCalculator
+        already; those read from plain .xyz do not. Attaching a calculator
+        here makes the behaviour independent of input format.
     """
     import inspect
 
@@ -127,8 +133,20 @@ def attach_calculators(neb, calculator_factory, workdir=None):
 
     n_args = len(inspect.signature(calculator_factory).parameters)
 
-    # Endpoints are fixed in a standard NEB run; only images 1..N-2 move.
-    for idx, image in enumerate(neb.images[1:-1], start=1):
+    if include_endpoints:
+        targets = list(enumerate(neb.images))
+    else:
+        targets = list(enumerate(neb.images))[1:-1]
+
+    for idx, image in targets:
+        # Preserve an existing energy if the structure already carries one.
+        if idx in (0, len(neb.images) - 1) and image.calc is not None:
+            try:
+                image.get_potential_energy()
+                continue
+            except Exception:  # noqa: BLE001
+                pass
+
         calc = calculator_factory(idx) if n_args >= 1 else calculator_factory()
 
         # Only file-based calculators (VASP, CP2K, Gaussian, ...) need their
