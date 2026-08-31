@@ -437,6 +437,22 @@ run 'sparc --analysis -h' or 'sparc --forcecorrect -h' for mode-specific options
     SparcLog("=" * 80)
     SparcLog("")
     # sys.exit(1)
+    # ===========================================================================
+    # SECTION 0: Nudged Elastic Band (standalone task)
+    # ===========================================================================
+    # NEB locates a minimum energy path between two fixed endpoints and does
+    # not feed into the AIMD / training / active-learning pipeline, so it runs
+    # on its own and the workflow returns once it completes.
+    if config.neb.run:
+        from sparc.src.neb import run_neb_from_config
+
+        summary = run_neb_from_config(config)
+
+        if not summary["converged"]:
+            SparcLog("[NEB] Optimizer did not converge within the step limit.")
+            sys.exit(1)
+        return
+
     # Extract workflow flags from config
     DftMDSteps = config.aimd_setup.steps
     dftmd_is = DftMDSteps > 0

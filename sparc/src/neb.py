@@ -6,7 +6,6 @@
 # ASE calculator factory, so the same code path serves DFT (VASP/CP2K)
 # reference calculations and trained MLPs (DeepMD, MACE, etc.).
 ################################################################
-import os
 from pathlib import Path
 
 import numpy as np
@@ -95,7 +94,9 @@ def build_band(
     elif interpolation.lower() == "linear":
         neb.interpolate()
     else:
-        raise ValueError(f"Unknown interpolation '{interpolation}'. Use 'idpp' or 'linear'.")
+        raise ValueError(
+            f"Unknown interpolation '{interpolation}'. Use 'idpp' or 'linear'."
+        )
 
     return neb
 
@@ -140,12 +141,18 @@ def attach_calculators(neb, calculator_factory, workdir=None, include_endpoints=
 
     for idx, image in targets:
         # Preserve an existing energy if the structure already carries one.
+        # Structures read from .traj arrive with a SinglePointCalculator
+        # holding the stored energy; recomputing it would be wasteful and,
+        # for a different calculator, inconsistent.
         if idx in (0, len(neb.images) - 1) and image.calc is not None:
             try:
                 image.get_potential_energy()
                 continue
-            except Exception:  # noqa: BLE001
-                pass
+            except (RuntimeError, AttributeError, NotImplementedError) as exc:
+                SparcLog(
+                    f"[NEB] endpoint {idx} carries a calculator but no usable "
+                    f"energy ({type(exc).__name__}); attaching a fresh one."
+                )
 
         calc = calculator_factory(idx) if n_args >= 1 else calculator_factory()
 
@@ -216,7 +223,9 @@ def run_neb(
         saddle image index, and output paths.
     """
     if optimizer.upper() not in OPTIMIZERS:
-        raise ValueError(f"Unknown optimizer '{optimizer}'. Options: {list(OPTIMIZERS)}")
+        raise ValueError(
+            f"Unknown optimizer '{optimizer}'. Options: {list(OPTIMIZERS)}"
+        )
     opt_class = OPTIMIZERS[optimizer.upper()]
 
     workdir = Path(workdir)
@@ -289,13 +298,21 @@ def run_neb(
     SparcLog("=" * 60)
     SparcLog("                   NEB SUMMARY                     ")
     SparcLog("=" * 60)
-    SparcLog(f"  Forward barrier   : {summary['forward_barrier_eV']:.4f} eV "
-             f"({summary['forward_barrier_kcal']:.2f} kcal/mol)")
-    SparcLog(f"  Reverse barrier   : {summary['reverse_barrier_eV']:.4f} eV "
-             f"({summary['reverse_barrier_kcal']:.2f} kcal/mol)")
-    SparcLog(f"  Reaction energy   : {summary['reaction_energy_eV']:.4f} eV "
-             f"({summary['reaction_energy_kcal']:.2f} kcal/mol)")
-    SparcLog(f"  Saddle image      : {summary['saddle_index']} of {len(neb.images) - 1}")
+    SparcLog(
+        f"  Forward barrier   : {summary['forward_barrier_eV']:.4f} eV "
+        f"({summary['forward_barrier_kcal']:.2f} kcal/mol)"
+    )
+    SparcLog(
+        f"  Reverse barrier   : {summary['reverse_barrier_eV']:.4f} eV "
+        f"({summary['reverse_barrier_kcal']:.2f} kcal/mol)"
+    )
+    SparcLog(
+        f"  Reaction energy   : {summary['reaction_energy_eV']:.4f} eV "
+        f"({summary['reaction_energy_kcal']:.2f} kcal/mol)"
+    )
+    SparcLog(
+        f"  Saddle image      : {summary['saddle_index']} of {len(neb.images) - 1}"
+    )
     SparcLog(f"  Converged         : {converged}")
     SparcLog("=" * 60 + "\n")
 
@@ -345,10 +362,15 @@ def analyse_band(images, workdir=None):
         out = Path(workdir) / "neb_energies.dat"
         with open(out, "w") as fh:
             fh.write("# image   E_rel(eV)   E_rel(kcal/mol)\n")
-            for i, (e_ev, e_kcal) in enumerate(
-                zip(summary["relative_energies_eV"], summary["relative_energies_kcal"])
-            ):
-                fh.write(f"{i:6d}  {e_ev:12.6f}  {e_kcal:14.4f}\n")
+            fh.writelines(
+                f"{i:6d}  {e_ev:12.6f}  {e_kcal:14.4f}\n"
+                for i, (e_ev, e_kcal) in enumerate(
+                    zip(
+                        summary["relative_energies_eV"],
+                        summary["relative_energies_kcal"],
+                    )
+                )
+            )
         summary["energy_file"] = str(out)
 
     return summary
@@ -373,6 +395,7 @@ def plot_band(images, filename="neb_profile.png", workdir=None):
     SparcLog(f"[NEB] Energy profile written to {out}")
 
     return str(out)
+
 
 # ===================================================================================================#
 def write_visualization(images, workdir=None, prefix="neb_path", optimizer_traj=None):
@@ -452,3 +475,75 @@ def write_visualization(images, workdir=None, prefix="neb_path", optimizer_traj=
             SparcLog(f"[NEB] Optimization movie skipped: {exc}")
 
     return written
+
+
+# ===================================================================================================#
+def run_neb_from_config(config):
+    """
+    Run a NEB calculation driven by a SPARC configuration object.
+
+    This is the entry point used by the main workflow. It bridges the
+    configured DFT engine to the calculator-agnostic NEB driver by wrapping
+    `dft_calculator` in a factory, so that each image receives its own
+    calculator instance.
+
+    Parameters
+    ----------
+    config : SparcConfig
+        Configuration containing a populated `neb` section and a
+        `dft_calculator` section specifying the engine.
+
+    Returns
+    -------
+    dict
+        Summary as returned by run_neb().
+    """
+    from sparc.src.calculator import dft_calculator
+
+    neb_cfg = config.neb
+
+    def calculator_factory(image_index):
+        # A fresh calculator per image: file-based engines would otherwise
+        # overwrite one another's scratch files, and stateful calculators
+        # would carry results between images.
+        return dft_calculator(config, print_screen=False)
+
+    SparcLog("")
+    SparcLog("=" * 80)
+    SparcLog(f"{'NUDGED ELASTIC BAND':^80}")
+    SparcLog("=" * 80)
+    SparcLog(f"{'DFT Engine':<30} {config.dft_calculator.engine}")
+    SparcLog(f"{'Initial structure':<30} {neb_cfg.initial_structure}")
+    SparcLog(f"{'Final structure':<30} {neb_cfg.final_structure}")
+    SparcLog(f"{'Intermediate images':<30} {neb_cfg.n_images}")
+    SparcLog(f"{'Interpolation':<30} {neb_cfg.interpolation}")
+    SparcLog(f"{'Climbing image':<30} {neb_cfg.climb}")
+    SparcLog(f"{'Optimizer':<30} {neb_cfg.optimizer}")
+    SparcLog("=" * 80)
+    SparcLog("")
+
+    summary = run_neb(
+        initial_file=neb_cfg.initial_structure,
+        final_file=neb_cfg.final_structure,
+        calculator_factory=calculator_factory,
+        n_images=neb_cfg.n_images,
+        interpolation=neb_cfg.interpolation,
+        climb=neb_cfg.climb,
+        two_stage=neb_cfg.two_stage,
+        spring_constant=neb_cfg.spring_constant,
+        fmax=neb_cfg.fmax,
+        fmax_loose=neb_cfg.fmax_loose,
+        steps=neb_cfg.steps,
+        optimizer=neb_cfg.optimizer,
+        workdir=neb_cfg.workdir,
+        trajfile=neb_cfg.trajfile,
+        logfile=neb_cfg.logfile,
+    )
+
+    try:
+        images = read(str(summary["path_file"]), index=":")
+        plot_band(images, workdir=neb_cfg.workdir)
+    except Exception as exc:  # noqa: BLE001
+        SparcLog(f"[NEB] Energy profile plot skipped: {exc}")
+
+    return summary

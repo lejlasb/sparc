@@ -382,6 +382,57 @@ class MLIPSetupConfig:
 
 
 @dataclass
+class NEBConfig:
+    """Nudged elastic band configuration."""
+
+    run: bool = False
+    initial_structure: Optional[str] = None
+    final_structure: Optional[str] = None
+    n_images: int = 8
+    interpolation: Literal["idpp", "linear"] = "idpp"
+    climb: bool = True
+    two_stage: bool = True
+    spring_constant: float = 0.1
+    fmax: float = 0.05
+    fmax_loose: float = 0.5
+    steps: int = 500
+    optimizer: Literal["BFGS", "LBFGS", "FIRE"] = "BFGS"
+    workdir: str = "neb"
+    trajfile: str = "neb.traj"
+    logfile: str = "neb.log"
+
+    def __post_init__(self):
+        if not self.run:
+            return
+
+        if not self.initial_structure or not self.final_structure:
+            raise ValidationError(
+                "NEB requires both 'initial_structure' and 'final_structure'"
+            )
+
+        for label, path in (
+            ("initial_structure", self.initial_structure),
+            ("final_structure", self.final_structure),
+        ):
+            if not Path(path).exists():
+                raise ValidationError(
+                    f"NEB {label} not found: {path}", context={"file": path}
+                )
+
+        if self.n_images < 1:
+            raise ValidationError("NEB n_images must be at least 1")
+        if self.spring_constant <= 0:
+            raise ValidationError("NEB spring_constant must be positive")
+        if self.fmax <= 0:
+            raise ValidationError("NEB fmax must be positive")
+        if self.two_stage and self.fmax_loose <= self.fmax:
+            raise ValidationError(
+                "NEB fmax_loose must exceed fmax; the first stage is a coarse "
+                "relaxation preceding the tight climbing-image stage"
+            )
+
+
+@dataclass
 class OutputConfig:
     """Output file settings."""
 
@@ -424,6 +475,7 @@ class SparcConfig:
     deal: DEALConfig = field(default_factory=DEALConfig)
     distance_metrics: List[DistanceMetric] = field(default_factory=list)
     output: OutputConfig = field(default_factory=OutputConfig)
+    neb: NEBConfig = field(default_factory=NEBConfig)
     cp2k: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -510,6 +562,9 @@ class SparcConfig:
             # Parse output config
             output = OutputConfig(**data.get("output", {}))
 
+            # Parse NEB config
+            neb = NEBConfig(**data.get("neb", {}))
+
             return cls(
                 general=general,
                 dft_calculator=dft_calc,
@@ -525,6 +580,7 @@ class SparcConfig:
                 deal=deal,
                 distance_metrics=distance_metrics,
                 output=output,
+                neb=neb,
                 cp2k=data.get("cp2k", {}),
             )
 
